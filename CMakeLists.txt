@@ -88,7 +88,6 @@ option(GRAPHICS_DISABLED "Disable disable graphics (ScrollView)" OFF)
 option(DISABLED_LEGACY_ENGINE "Disable the legacy OCR engine" OFF)
 option(ENABLE_LTO "Enable link-time optimization" OFF)
 option(FAST_FLOAT "Enable float for LSTM" ON)
-option(ENABLE_OPENCL "Enable unsupported experimental OpenCL support" OFF)
 option(ENABLE_NATIVE
        "Enable optimization for host CPU (could break HW compatibility)" OFF)
 # see
@@ -96,6 +95,7 @@ option(ENABLE_NATIVE
 option(BUILD_TRAINING_TOOLS "Build training tools" ON)
 option(BUILD_TESTS "Build tests" OFF)
 option(USE_SYSTEM_ICU "Use system ICU" OFF)
+option(DISABLE_TIFF "Disable build with libtiff (if available)" OFF)
 option(DISABLE_ARCHIVE "Disable build with libarchive (if available)" OFF)
 option(DISABLE_CURL "Disable build with libcurl (if available)" OFF)
 option(INSTALL_CONFIGS "Install tesseract configs" ON)
@@ -257,7 +257,11 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "arm.*")
   set(HAVE_AVX512F FALSE)
   set(HAVE_FMA FALSE)
   set(HAVE_SSE4_1 FALSE)
+
   check_cxx_compiler_flag("-mfpu=neon" HAVE_NEON)
+  if(HAVE_NEON)
+    set(NEON_COMPILE_FLAGS "-mfpu=neon")
+  endif(HAVE_NEON)
 
 else()
 
@@ -271,7 +275,6 @@ else()
 endif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86|x86_64|AMD64|amd64|i386|i686")
 
 if(HAVE_NEON)
-  set(NEON_COMPILE_FLAGS "-mfpu=neon")
   message(STATUS "LTO build is not supported on arm/RBPi.")
   set(ENABLE_LTO FALSE)  # enable LTO cause fatal error on arm/RBPi
 endif()
@@ -323,7 +326,7 @@ if(OPENMP_BUILD)
   if(NOT OpenMP_FOUND
      AND CLANG
      AND WIN32)
-    # workaroung because find_package(OpenMP) does not work for clang-cl
+    # workaround because find_package(OpenMP) does not work for clang-cl
     # https://gitlab.kitware.com/cmake/cmake/issues/19404
     check_include_file_cxx(omp.h HAVE_OMP_H_INCLUDE)
     find_library(OpenMP_LIBRARY NAMES omp libomp.lib)
@@ -371,6 +374,7 @@ add_definitions("-DCMAKE_BUILD")
 # packages
 #
 # ##############################################################################
+include(CheckFunctions)
 
 if(SW_BUILD)
   find_package(SW REQUIRED)
@@ -397,21 +401,37 @@ else()
   endif()
   if(NOT Leptonica_FOUND)
     message(FATAL_ERROR "Cannot find required library Leptonica. Quitting!")
+  else()
+    message(STATUS "Found leptonica version: ${Leptonica_VERSION}")
   endif(NOT Leptonica_FOUND)
   include_directories(${Leptonica_INCLUDE_DIRS})
 
-  # Check for optional libraries.
-  find_package(TIFF) # for tesseract
-  if(NOT TIFF_FOUND AND PKG_CONFIG_EXECUTABLE)
-    # try PKG_CONFIG to find libtiff if cmake failed
-    pkg_check_modules(TIFF libtiff-4)
+  check_leptonica_tiff_support()
+  if ((NOT LEPT_TIFF_RESULT EQUAL 0) AND LEPT_TIFF_COMPILE_SUCCESS)
+    message(NOTICE "Leptonica was build without TIFF support! Disabling TIFF support...")
+    set(DISABLE_TIFF ON)
+  elseif(NOT ${CMAKE_VERSION} VERSION_LESS "3.25")
+    message(STATUS "Leptonica was build with TIFF support.")
   endif()
-  if(TIFF_FOUND)
-    set(HAVE_TIFFIO_H ON)
-    include_directories(${TIFF_INCLUDE_DIRS})
-  endif(TIFF_FOUND)
+
+  # Check for optional libraries.
+  if(DISABLE_TIFF)
+    set(HAVE_TIFFIO_H OFF)
+    message(STATUS "TIFF support disabled.")
+  else(DISABLE_TIFF)
+    find_package(TIFF) # for tesseract
+    if(NOT TIFF_FOUND AND PKG_CONFIG_EXECUTABLE)
+      # try PKG_CONFIG to find libtiff if cmake failed
+      pkg_check_modules(TIFF libtiff-4)
+    endif()
+    if(TIFF_FOUND)
+      set(HAVE_TIFFIO_H ON)
+      include_directories(${TIFF_INCLUDE_DIRS})
+    endif(TIFF_FOUND)
+  endif(DISABLE_TIFF)
   if(DISABLE_ARCHIVE)
     set(HAVE_LIBARCHIVE OFF)
+    message(STATUS "LibArchive support disabled.")
   else(DISABLE_ARCHIVE)
     find_package(LibArchive)
     if(NOT LibArchive_FOUND AND PKG_CONFIG_EXECUTABLE)
@@ -425,6 +445,7 @@ else()
   endif(DISABLE_ARCHIVE)
   if(DISABLE_CURL)
     set(HAVE_LIBCURL OFF)
+    message(STATUS "CURL support disabled.")
   else(DISABLE_CURL)
     find_package(CURL)
     if(NOT CURL_FOUND AND PKG_CONFIG_EXECUTABLE)
@@ -437,18 +458,6 @@ else()
     endif(CURL_FOUND)
   endif(DISABLE_CURL)
 endif()
-
-if(ENABLE_OPENCL)
-  find_package(OpenCL)
-  if(OpenCL_FOUND)
-    include_directories(${OpenCL_INCLUDE_DIRS})
-    message(STATUS "OpenCL_INCLUDE_DIRS: ${OpenCL_INCLUDE_DIRS}")
-    message(STATUS "OpenCL_LIBRARY: ${OpenCL_LIBRARY}")
-    set(USE_OPENCL ON)
-  else()
-    set(USE_OPENCL OFF)
-  endif(OpenCL_FOUND)
-endif(ENABLE_OPENCL)
 
 # ##############################################################################
 #
@@ -543,11 +552,6 @@ message(STATUS "Disable the legacy OCR engine [DISABLED_LEGACY_ENGINE]: "
 message(STATUS "Build training tools [BUILD_TRAINING_TOOLS]: "
                "${BUILD_TRAINING_TOOLS}")
 message(STATUS "Build tests [BUILD_TESTS]: ${BUILD_TESTS}")
-if(ENABLE_OPENCL)
-  message(
-    STATUS
-      "Enable unsupported experimental OpenCL [ENABLE_OPENCL]: ${USE_OPENCL}")
-endif(ENABLE_OPENCL)
 message(STATUS "Use system ICU Library [USE_SYSTEM_ICU]: ${USE_SYSTEM_ICU}")
 message(
   STATUS "Install tesseract configs [INSTALL_CONFIGS]: ${INSTALL_CONFIGS}")
@@ -586,7 +590,6 @@ file(
   src/cutil/*.cpp
   src/dict/*.cpp
   src/lstm/*.cpp
-  src/opencl/*.cpp
   src/textord/*.cpp
   src/viewer/*.cpp
   src/wordrec/*.cpp)
@@ -727,7 +730,6 @@ file(
   src/cutil/*.h
   src/dict/*.h
   src/lstm/*.h
-  src/opencl/*.h
   src/textord/*.h
   src/viewer/*.h
   src/wordrec/*.h)
@@ -738,6 +740,7 @@ set(TESSERACT_SRC
     src/api/capi.cpp
     src/api/renderer.cpp
     src/api/altorenderer.cpp
+    src/api/pagerenderer.cpp
     src/api/hocrrenderer.cpp
     src/api/lstmboxrenderer.cpp
     src/api/pdfrenderer.cpp
@@ -762,6 +765,7 @@ set(TESSERACT_CONFIGS
     tessdata/configs/lstmbox
     tessdata/configs/lstmdebug
     tessdata/configs/makebox
+    tessdata/configs/page
     tessdata/configs/pdf
     tessdata/configs/quiet
     tessdata/configs/rebox
@@ -794,7 +798,6 @@ target_include_directories(
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/cutil>
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/dict>
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/lstm>
-         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/opencl>
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/textord>
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/viewer>
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/wordrec>
@@ -809,9 +812,6 @@ endif()
 target_link_libraries(libtesseract PRIVATE ${LIB_Ws2_32} ${LIB_pthread})
 if(OpenMP_CXX_FOUND)
   target_link_libraries(libtesseract PUBLIC OpenMP::OpenMP_CXX)
-endif()
-if(OpenCL_FOUND)
-  target_link_libraries(libtesseract PUBLIC OpenCL::OpenCL)
 endif()
 if(LibArchive_FOUND)
   target_link_libraries(libtesseract PUBLIC ${LibArchive_LIBRARIES})
@@ -927,12 +927,19 @@ install(
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
   RENAME tesseract.pc)
 install(TARGETS tesseract DESTINATION bin)
+if (MSVC)
+  install(FILES $<TARGET_PDB_FILE:${PROJECT_NAME}> DESTINATION bin OPTIONAL)
+endif()
 install(
   TARGETS libtesseract
   EXPORT TesseractTargets
   RUNTIME DESTINATION bin
+  RUNTIME DESTINATION bin
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+if (MSVC AND BUILD_SHARED_LIBS)
+  install(FILES $<TARGET_PDB_FILE:libtesseract> DESTINATION bin OPTIONAL)
+endif()
 install(
   EXPORT TesseractTargets
   NAMESPACE Tesseract::
